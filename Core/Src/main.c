@@ -24,7 +24,8 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <string.h>
+#include <stdbool.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -46,6 +47,9 @@
 
 /* USER CODE BEGIN PV */
 int16_t motor_pulses[4] = {0}; // 用于存储四个电机的脉冲计数值
+static int16_t pulse_snapshot[4] = {0}; // I2C 发送专用快照
+
+volatile bool i2c_error_flag = false; // I2C 错误标志，用于在错误回调中设置，在主循环中检查并处理
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -109,6 +113,14 @@ int main(void) {
         /* USER CODE END WHILE */
 
         /* USER CODE BEGIN 3 */
+        if (i2c_error_flag) {
+            i2c_error_flag = false;
+            HAL_I2C_DeInit(&hi2c2);
+            MX_I2C2_Init();
+            HAL_I2C_EnableListen_IT(&hi2c2);
+            HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_SET); // 恢复后灭灯
+        }
+        __WFI(); // 无事可做时低功耗等待，中断来了自动唤醒
     }
     /* USER CODE END 3 */
 }
@@ -163,8 +175,12 @@ void HAL_I2C_AddrCallback(I2C_HandleTypeDef *hi2c, uint8_t TransferDirection, ui
             motor_pulses[2] = (int16_t) __HAL_TIM_GET_COUNTER(&htim3);
             motor_pulses[3] = (int16_t) __HAL_TIM_GET_COUNTER(&htim4);
 
-            // 将 4 个电机的脉冲计数值打包成 8 字节数据发送给主机
-            HAL_I2C_Slave_Seq_Transmit_IT(hi2c, (uint8_t *) motor_pulses, sizeof(motor_pulses), I2C_FIRST_AND_LAST_FRAME);
+            memcpy(pulse_snapshot, motor_pulses, sizeof(pulse_snapshot));
+            if (HAL_I2C_Slave_Seq_Transmit_IT(hi2c, (uint8_t *) pulse_snapshot, sizeof(pulse_snapshot),
+                                              I2C_FIRST_AND_LAST_FRAME) != HAL_OK) {
+                // 发送失败，主机会收到 NACK，下次轮询自然重试，无需额外处理
+                // 但如果需要统计丢包率，可在此处加计数器
+            }
         }
     }
 }
@@ -176,7 +192,6 @@ void HAL_I2C_AddrCallback(I2C_HandleTypeDef *hi2c, uint8_t TransferDirection, ui
 void HAL_I2C_ListenCpltCallback(I2C_HandleTypeDef *hi2c) {
     // 监听完成后继续开启监听
     HAL_I2C_EnableListen_IT(hi2c);
-    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_SET);
 }
 
 /**
@@ -184,11 +199,8 @@ void HAL_I2C_ListenCpltCallback(I2C_HandleTypeDef *hi2c) {
  * @param hi2c
  */
 void HAL_I2C_ErrorCallback(I2C_HandleTypeDef *hi2c) {
-    // I2C 错误时，重置 I2C 外设并重新初始化
-    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_RESET);
-    HAL_I2C_DeInit(hi2c);
-    MX_I2C2_Init();
-    HAL_I2C_EnableListen_IT(hi2c);
+    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_RESET); // 低电平，LED亮，报错
+    i2c_error_flag = true; // 设置错误标志，在主循环中可以检查并处理
 }
 
 /* USER CODE END 4 */
